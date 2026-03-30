@@ -26,15 +26,14 @@ from ragcore.config import settings
 
 def _build_retriever():
     """Instantiate models and return a Retriever ready to use."""
-    from sentence_transformers import CrossEncoder
-
     from ragcore.embedding import build_embedder
+    from ragcore.reranker import build_reranker
     from ragcore.store.chroma import RagStore
     from ragcore.retrieval import Retriever
 
     store = RagStore(settings)
     embed_model = build_embedder(settings)
-    rerank_model = CrossEncoder(settings.rerank_model)
+    rerank_model = build_reranker(settings)
     return Retriever(store=store, embedding_model=embed_model, rerank_model=rerank_model, settings=settings)
 
 

@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     embedding_api_url: str = ""   # alias (openai/huggingface/nvidia/together/groq/ollama) or full base URL
     embedding_api_key: str = ""   # API key for remote providers
 
+    # Reranker provider — "local" (cross-encoder) or "cohere" / "jina" / "voyage" / custom URL
+    rerank_provider: str = "local"
+    rerank_api_url: str = ""   # alias (cohere/jina/voyage) or full base URL
+    rerank_api_key: str = ""   # API key for remote providers
+
     # Embedding + rerank models
     embedding_model: str = "all-MiniLM-L6-v2"
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-2-v2"

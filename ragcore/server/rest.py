@@ -147,6 +147,7 @@ def create_app(
                 "chroma": "ok",
                 "embedding_provider": cfg.embedding_provider,
                 "embedding_model": cfg.embedding_model,
+                "rerank_provider": cfg.rerank_provider,
                 "rerank_model": cfg.rerank_model,
             },
         }

@@ -44,7 +44,8 @@ class Retriever:
         if not candidates:
             return []
         pairs = [[query, c["content"]] for c in candidates]
-        scores = self._rerank_model.predict(pairs).tolist()
+        raw = self._rerank_model.predict(pairs)
+        scores: list[float] = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         for candidate, score in zip(candidates, scores):
             candidate["score"] = float(score)
         return sorted(candidates, key=lambda c: c["score"], reverse=True)
