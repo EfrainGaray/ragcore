@@ -26,6 +26,8 @@ class Retriever:
         cache: SearchCache | None = None,
         hyde=None,
         expander=None,
+        crag=None,
+        multivector=None,
     ) -> None:
         self._store = store
         self._embed_model = embedding_model
@@ -46,6 +48,28 @@ class Retriever:
 
         self._hyde = hyde
         self._expander = expander
+
+        # Auto-create CRAG from settings if not injected
+        if crag is None and getattr(settings, "crag_enabled", False):
+            try:
+                from ragcore.crag import CorrectiveRAG  # type: ignore
+                crag = CorrectiveRAG(
+                    rerank_model=rerank_model,
+                    threshold=settings.crag_threshold,
+                    web_search=settings.crag_web_search,
+                )
+            except Exception as exc:
+                logger.warning("CorrectiveRAG unavailable: {}", exc)
+
+        self._crag = crag
+
+        # Multi-vector retriever (standalone — warn if enabled)
+        if multivector is None and getattr(settings, "multivector_enabled", False):
+            logger.warning(
+                "multivector_enabled=True but multi-vector search is not yet integrated "
+                "into the main search pipeline. Use the /multivector/search endpoint directly."
+            )
+        self._multivector = multivector
 
     # ------------------------------------------------------------------
     # Internal helpers (CPU-bound — run off the event loop)
@@ -203,6 +227,12 @@ class Retriever:
         ranked = await loop.run_in_executor(
             None, partial(self._rerank, query, candidates)
         )
+
+        # 4.5 CRAG: drop low-relevance chunks
+        if getattr(self._settings, "crag_enabled", False) and self._crag is not None:
+            ranked = await loop.run_in_executor(
+                None, partial(self._crag.filter_chunks, query, ranked)
+            )
 
         # 5. Trim to top_n
         top = ranked[:effective_top_n]

@@ -47,6 +47,39 @@ class Settings(BaseSettings):
     parent_child_chunks: bool = False
     parent_chunk_size: int = 1536
 
+    # Semantic chunking
+    semantic_chunking: bool = False
+    semantic_chunk_threshold: float = 0.5   # cosine similarity drop threshold
+    semantic_chunk_max_size: int = 512
+
+    # RAG Evaluation
+    eval_enabled: bool = False
+    eval_llm_url: str = ""     # reuses hyde_llm_url if empty
+    eval_llm_key: str = ""
+    eval_llm_model: str = "gpt-4o-mini"
+
+    # CRAG
+    crag_enabled: bool = False
+    crag_threshold: float = 0.5    # relevance score below which chunks are dropped
+    crag_web_search: bool = False  # supplement with web search if too few chunks survive
+
+    # RAPTOR
+    raptor_enabled: bool = False
+    raptor_levels: int = 3
+    raptor_llm_url: str = ""    # reuses hyde_llm_url if empty
+    raptor_llm_key: str = ""
+    raptor_llm_model: str = "gpt-4o-mini"
+
+    # Multi-vector retrieval
+    multivector_enabled: bool = False
+
+    # GraphRAG
+    graphrag_enabled: bool = False
+    graphrag_spacy_model: str = "en_core_web_sm"
+
+    # Multi-modal
+    multimodal_enabled: bool = False
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

@@ -51,10 +51,42 @@ def _build_retriever():
 def _build_ingestor(retriever):
     from ragcore.store.ingest import Ingestor
 
+    embed_model = retriever._embed_model
+
+    # SemanticChunker (optional — only when semantic_chunking=True)
+    semantic_chunker = None
+    if settings.semantic_chunking:
+        try:
+            from ragcore.chunking.semantic import SemanticChunker  # type: ignore
+            semantic_chunker = SemanticChunker(
+                embed_model=embed_model,
+                threshold=settings.semantic_chunk_threshold,
+                max_chunk_size=settings.semantic_chunk_max_size,
+            )
+        except Exception as exc:
+            logger.warning("SemanticChunker unavailable: {}", exc)
+
+    # RaptorIndexer (optional — only when raptor_enabled=True)
+    raptor_indexer = None
+    if settings.raptor_enabled:
+        try:
+            from ragcore.raptor import RaptorIndexer  # type: ignore
+            raptor_indexer = RaptorIndexer(
+                embed_model=embed_model,
+                llm_url=settings.raptor_llm_url or settings.hyde_llm_url,
+                llm_key=settings.raptor_llm_key,
+                llm_model=settings.raptor_llm_model,
+                levels=settings.raptor_levels,
+            )
+        except Exception as exc:
+            logger.warning("RaptorIndexer unavailable: {}", exc)
+
     return Ingestor(
         store=retriever._store,
-        embedding_model=retriever._embed_model,
+        embedding_model=embed_model,
         settings=settings,
+        semantic_chunker=semantic_chunker,
+        raptor_indexer=raptor_indexer,
     )
 
 

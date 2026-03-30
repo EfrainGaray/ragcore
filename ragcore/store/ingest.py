@@ -66,6 +66,16 @@ def _read_code(data: bytes) -> list[tuple[str, int]]:
     return [(data.decode("utf-8", errors="replace"), 0)]
 
 
+def _read_image_stub(data: bytes) -> list[tuple[str, int]]:
+    """Delegate to ragcore.multimodal if available; otherwise graceful no-op."""
+    try:
+        from ragcore.multimodal import extract_images  # type: ignore
+        # extract_images takes (filename, data); here we only have data, pass empty name
+        return extract_images("", data)
+    except Exception:
+        return [("", 0)]
+
+
 # Extensions treated as source code (smaller chunks, file_type="code")
 CODE_EXTENSIONS: frozenset[str] = frozenset({
     ".py", ".ts", ".js", ".go", ".rs", ".java",
@@ -93,6 +103,10 @@ _READERS = {
     ".go": _read_code,
     ".rs": _read_code,
     ".java": _read_code,
+    # Image files (handled by ragcore.multimodal when multimodal_enabled=True)
+    ".png": _read_image_stub,
+    ".jpg": _read_image_stub,
+    ".jpeg": _read_image_stub,
 }
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(_READERS.keys())
@@ -172,10 +186,14 @@ class Ingestor:
         store: RagStore,
         embedding_model,
         settings: Settings,
+        semantic_chunker=None,
+        raptor_indexer=None,
     ) -> None:
         self._store = store
         self._model = embedding_model
         self._settings = settings
+        self._semantic_chunker = semantic_chunker
+        self._raptor_indexer = raptor_indexer
 
     def ingest(self, filename: str, data: bytes) -> int:
         """Ingest a document.  Returns number of child chunks stored."""
@@ -242,11 +260,18 @@ class Ingestor:
                         )
                         chunk_index += 1
             else:
-                text_chunks = chunk_text(
-                    text,
-                    chunk_size=effective_chunk_size,
-                    chunk_overlap=self._settings.chunk_overlap,
+                use_semantic = (
+                    getattr(self._settings, "semantic_chunking", False)
+                    and self._semantic_chunker is not None
                 )
+                if use_semantic:
+                    text_chunks = self._semantic_chunker.chunk(text)
+                else:
+                    text_chunks = chunk_text(
+                        text,
+                        chunk_size=effective_chunk_size,
+                        chunk_overlap=self._settings.chunk_overlap,
+                    )
                 for chunk in text_chunks:
                     all_chunks.append(
                         {
@@ -291,4 +316,23 @@ class Ingestor:
 
         self._store.add_chunks(all_chunks)
         logger.info("Stored {} chunks for {}", len(all_chunks), filename)
+
+        # RAPTOR: build hierarchical summary tree and store summary chunks
+        if getattr(self._settings, "raptor_enabled", False) and self._raptor_indexer is not None:
+            try:
+                raptor_chunks = self._raptor_indexer.build_tree(all_chunks)
+                if raptor_chunks:
+                    r_texts = [c["content"] for c in raptor_chunks]
+                    r_raw = self._model.encode(r_texts, show_progress_bar=False)
+                    if hasattr(r_raw, "tolist"):
+                        r_embeddings = r_raw.tolist()
+                    else:
+                        r_embeddings = [e.tolist() if hasattr(e, "tolist") else list(e) for e in r_raw]
+                    for chunk, emb in zip(raptor_chunks, r_embeddings):
+                        chunk["embedding"] = emb
+                    self._store.add_chunks(raptor_chunks)
+                    logger.debug("Stored {} RAPTOR summary chunks for {}", len(raptor_chunks), filename)
+            except Exception as exc:
+                logger.warning("RAPTOR build_tree failed for {}: {}", filename, exc)
+
         return len(all_chunks)

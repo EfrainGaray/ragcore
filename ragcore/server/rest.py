@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
+from functools import partial
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from ragcore.config import Settings, settings as default_settings
 from ragcore.models import (
@@ -456,7 +459,7 @@ def create_app(
     async def chat_completions(
         req: ChatCompletionRequest,
         ret: Retriever = Depends(get_retriever),
-    ) -> ChatCompletionResponse:
+    ):
         # Extract the last user message as the search query
         user_messages = [m for m in req.messages if m.role == "user"]
         if not user_messages:
@@ -467,8 +470,25 @@ def create_app(
         query = user_messages[-1].content
 
         response = await ret.search(query=query, top_n=req.top_n)
+        context = "\n\n".join(r.content for r in response.results)
 
-        # Serialise results to JSON string — the calling AI decides what to do with them
+        # Streaming path: if stream=True, delegate to streaming module
+        if req.stream:
+            from ragcore.server.streaming import stream_chat_completion
+
+            async def generate():
+                async for line in stream_chat_completion(
+                    query=query,
+                    context=context,
+                    llm_url=getattr(cfg, "hyde_llm_url", ""),
+                    llm_key=getattr(cfg, "hyde_llm_key", ""),
+                    llm_model=getattr(cfg, "hyde_llm_model", "gpt-4o-mini"),
+                ):
+                    yield line
+
+            return StreamingResponse(generate(), media_type="text/event-stream")
+
+        # Standard path: serialise results to JSON string
         content_json = json.dumps(
             {
                 "query": query,
@@ -493,5 +513,93 @@ def create_app(
             usage={},
             rag_results=response.results,
         )
+
+    # ------------------------------------------------------------------
+    # RAG Evaluation endpoint
+    # ------------------------------------------------------------------
+
+    class EvalRequest(BaseModel):
+        query: str
+        answer: str
+        contexts: list[str]
+        ground_truth: str | None = None
+
+    @app.post(
+        "/evaluate",
+        tags=["RAG"],
+        summary="Evaluate a RAG answer",
+        description=(
+            "Compute faithfulness, answer relevance, context recall, and context precision "
+            "for a given query/answer/context triple. Requires `eval_enabled=True` in settings "
+            "and the `ragcore.evaluation` module to be available."
+        ),
+    )
+    async def evaluate(
+        req: EvalRequest,
+        ing: Ingestor = Depends(get_ingestor),
+    ) -> dict[str, Any]:
+        if not getattr(cfg, "eval_enabled", False):
+            raise HTTPException(status_code=503, detail="eval_enabled is False in settings")
+        try:
+            from ragcore.evaluation import RAGEvaluator  # type: ignore
+
+            eval_llm_url = cfg.eval_llm_url or getattr(cfg, "hyde_llm_url", "")
+            evaluator = RAGEvaluator(
+                embed_model=ing._model,
+                llm_url=eval_llm_url,
+                llm_key=cfg.eval_llm_key,
+                llm_model=cfg.eval_llm_model,
+            )
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                partial(
+                    evaluator.evaluate,
+                    req.query,
+                    req.answer,
+                    req.contexts,
+                    req.ground_truth,
+                ),
+            )
+            return result.model_dump()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # GraphRAG search endpoint
+    # ------------------------------------------------------------------
+
+    class GraphSearchRequest(BaseModel):
+        query: str
+        top_k: int = 5
+
+    @app.post(
+        "/graph/search",
+        tags=["RAG"],
+        summary="Graph-guided retrieval (GraphRAG)",
+        description=(
+            "Search using entity/relation graph built from ingested documents. "
+            "Requires `graphrag_enabled=True` in settings and the `ragcore.graph` "
+            "module to be available."
+        ),
+    )
+    async def graph_search(
+        req: GraphSearchRequest,
+        ret: Retriever = Depends(get_retriever),
+    ) -> dict[str, Any]:
+        if not getattr(cfg, "graphrag_enabled", False):
+            raise HTTPException(status_code=503, detail="graphrag_enabled is False in settings")
+        try:
+            from ragcore.graph import GraphRetriever  # type: ignore
+
+            graph_retriever = GraphRetriever(store=ret._store)
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None,
+                partial(graph_retriever.search, req.query, req.top_k),
+            )
+            return {"query": req.query, "results": results}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return app

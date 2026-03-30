@@ -63,6 +63,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "ragcore"
     messages: list[Message]
     top_n: int | None = None
+    stream: bool = False
 
 
 class ChatCompletionResponse(BaseModel):
