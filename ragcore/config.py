@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     chroma_collection: str = "ragcore"
     chroma_namespace: str = "default"
 
+    # Embedding provider — "local" (sentence-transformers) or "openai" (any OpenAI-compatible API)
+    embedding_provider: str = "local"
+    embedding_api_url: str = ""   # alias (openai/huggingface/nvidia/together/groq/ollama) or full base URL
+    embedding_api_key: str = ""   # API key for remote providers
+
     # Embedding + rerank models
     embedding_model: str = "all-MiniLM-L6-v2"
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-2-v2"

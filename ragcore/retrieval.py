@@ -36,7 +36,9 @@ class Retriever:
     # ------------------------------------------------------------------
 
     def _embed(self, text: str) -> list[float]:
-        return self._embed_model.encode([text], show_progress_bar=False)[0].tolist()
+        result = self._embed_model.encode([text], show_progress_bar=False)
+        row = result[0]
+        return row.tolist() if hasattr(row, "tolist") else list(row)
 
     def _rerank(self, query: str, candidates: list[dict]) -> list[dict]:
         if not candidates:

@@ -145,6 +145,7 @@ def create_app(
             "doc_count": doc_count,
             "checks": {
                 "chroma": "ok",
+                "embedding_provider": cfg.embedding_provider,
                 "embedding_model": cfg.embedding_model,
                 "rerank_model": cfg.rerank_model,
             },
@@ -399,7 +400,7 @@ def create_app(
             {
                 "object": "embedding",
                 "index": i,
-                "embedding": emb.tolist(),
+                "embedding": emb.tolist() if hasattr(emb, "tolist") else list(emb),
             }
             for i, emb in enumerate(embeddings_array)
         ]

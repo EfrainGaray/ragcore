@@ -215,7 +215,12 @@ class Ingestor:
 
         # Embed all chunks in one batch
         texts = [c["content"] for c in all_chunks]
-        embeddings = self._model.encode(texts, show_progress_bar=False).tolist()
+        raw = self._model.encode(texts, show_progress_bar=False)
+        # Support numpy arrays (LocalEmbedder) and plain lists (OpenAICompatibleEmbedder)
+        if hasattr(raw, "tolist"):
+            embeddings = raw.tolist()
+        else:
+            embeddings = [e.tolist() if hasattr(e, "tolist") else list(e) for e in raw]
 
         for chunk, emb in zip(all_chunks, embeddings):
             chunk["embedding"] = emb
