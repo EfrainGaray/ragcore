@@ -30,11 +30,22 @@ def _build_retriever():
     from ragcore.reranker import build_reranker
     from ragcore.store.chroma import RagStore
     from ragcore.retrieval import Retriever
+    from ragcore.hyde import build_hyde
+    from ragcore.query_expansion import build_expander
 
     store = RagStore(settings)
     embed_model = build_embedder(settings)
     rerank_model = build_reranker(settings)
-    return Retriever(store=store, embedding_model=embed_model, rerank_model=rerank_model, settings=settings)
+    hyde = build_hyde(settings)
+    expander = build_expander(settings)
+    return Retriever(
+        store=store,
+        embedding_model=embed_model,
+        rerank_model=rerank_model,
+        settings=settings,
+        hyde=hyde,
+        expander=expander,
+    )
 
 
 def _build_ingestor(retriever):

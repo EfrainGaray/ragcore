@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
 
+    # Hybrid search (BM25 + dense vectors + RRF)
+    hybrid_search: bool = False   # enable BM25 + dense fusion
+    bm25_weight: float = 0.3      # legacy — RRF doesn't use weights, keep for future use
+
+    # HyDE (Hypothetical Document Embeddings)
+    hyde_enabled: bool = False
+    hyde_llm_url: str = ""    # e.g. "https://api.openai.com/v1" or alias
+    hyde_llm_key: str = ""
+    hyde_llm_model: str = "gpt-4o-mini"
+
+    # Query Expansion (RAG-Fusion)
+    query_expansion_enabled: bool = False
+    query_expansion_count: int = 3   # number of alternative phrasings
+
+    # Parent-Child Chunks
+    parent_child_chunks: bool = False
+    parent_chunk_size: int = 1536
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

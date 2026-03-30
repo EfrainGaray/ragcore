@@ -61,3 +61,50 @@ def test_chroma_path_default():
 
     cfg = Settings()
     assert cfg.chroma_path == "./data/chroma"
+
+
+# ---------------------------------------------------------------------------
+# Advanced RAG feature defaults
+# ---------------------------------------------------------------------------
+
+
+def test_default_hybrid_search_disabled():
+    """settings.hybrid_search must default to False."""
+    from ragcore.config import Settings
+
+    cfg = Settings()
+    assert cfg.hybrid_search is False
+
+
+def test_default_hyde_disabled():
+    """settings.hyde_enabled must default to False."""
+    from ragcore.config import Settings
+
+    cfg = Settings()
+    assert cfg.hyde_enabled is False
+
+
+def test_default_query_expansion_disabled():
+    """settings.query_expansion_enabled must default to False."""
+    from ragcore.config import Settings
+
+    cfg = Settings()
+    assert cfg.query_expansion_enabled is False
+
+
+def test_default_parent_child_disabled():
+    """settings.parent_child_chunks must default to False."""
+    from ragcore.config import Settings
+
+    cfg = Settings()
+    assert cfg.parent_child_chunks is False
+
+
+def test_hybrid_search_env_override(monkeypatch):
+    """HYBRID_SEARCH=true env var must result in settings.hybrid_search == True."""
+    monkeypatch.setenv("HYBRID_SEARCH", "true")
+
+    from ragcore.config import Settings
+
+    cfg = Settings()
+    assert cfg.hybrid_search is True

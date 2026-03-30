@@ -178,7 +178,7 @@ class Ingestor:
         self._settings = settings
 
     def ingest(self, filename: str, data: bytes) -> int:
-        """Ingest a document.  Returns number of chunks stored."""
+        """Ingest a document.  Returns number of child chunks stored."""
         pages = extract_text(filename, data)
         logger.info("Ingesting {} — {} page(s)", filename, len(pages))
 
@@ -187,33 +187,97 @@ class Ingestor:
         file_type = "code" if is_code else "document"
         effective_chunk_size = CODE_CHUNK_SIZE if is_code else self._settings.chunk_size
 
+        use_parent_child = (
+            getattr(self._settings, "parent_child_chunks", False) and not is_code
+        )
+        parent_chunk_size = getattr(self._settings, "parent_chunk_size", 1536)
+
         all_chunks: list[dict] = []
+        parent_chunks: list[dict] = []
         chunk_index = 0
 
         for text, page in pages:
-            text_chunks = chunk_text(
-                text,
-                chunk_size=effective_chunk_size,
-                chunk_overlap=self._settings.chunk_overlap,
-            )
-            for chunk in text_chunks:
-                all_chunks.append(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "content": chunk,
-                        "filename": filename,
-                        "page": page,
-                        "chunk_index": chunk_index,
-                        "file_type": file_type,
-                    }
+            if use_parent_child:
+                # 1. Create parent chunks first
+                p_chunks = chunk_text(
+                    text,
+                    chunk_size=parent_chunk_size,
+                    chunk_overlap=self._settings.chunk_overlap,
                 )
-                chunk_index += 1
+                for p_text in p_chunks:
+                    parent_id = str(uuid.uuid4())
+                    ns_parent_id = f"{self._store._namespace}:{parent_id}"
+                    # Store parent chunk (not embedded, not searched — metadata flag)
+                    parent_chunks.append(
+                        {
+                            "id": parent_id,
+                            "content": p_text,
+                            "filename": filename,
+                            "page": page,
+                            "chunk_index": chunk_index,
+                            "file_type": file_type,
+                            "chunk_type": "parent",
+                            "is_parent": True,
+                        }
+                    )
+
+                    # 2. Create child chunks within this parent
+                    c_chunks = chunk_text(
+                        p_text,
+                        chunk_size=effective_chunk_size,
+                        chunk_overlap=self._settings.chunk_overlap,
+                    )
+                    for c_text in c_chunks:
+                        all_chunks.append(
+                            {
+                                "id": str(uuid.uuid4()),
+                                "content": c_text,
+                                "filename": filename,
+                                "page": page,
+                                "chunk_index": chunk_index,
+                                "file_type": file_type,
+                                "chunk_type": "child",
+                                "parent_id": ns_parent_id,
+                            }
+                        )
+                        chunk_index += 1
+            else:
+                text_chunks = chunk_text(
+                    text,
+                    chunk_size=effective_chunk_size,
+                    chunk_overlap=self._settings.chunk_overlap,
+                )
+                for chunk in text_chunks:
+                    all_chunks.append(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "content": chunk,
+                            "filename": filename,
+                            "page": page,
+                            "chunk_index": chunk_index,
+                            "file_type": file_type,
+                        }
+                    )
+                    chunk_index += 1
 
         if not all_chunks:
             logger.warning("No chunks produced for {}", filename)
             return 0
 
-        # Embed all chunks in one batch
+        # Embed parent chunks so they can be retrieved by content.
+        if parent_chunks:
+            p_texts = [c["content"] for c in parent_chunks]
+            p_raw = self._model.encode(p_texts, show_progress_bar=False)
+            if hasattr(p_raw, "tolist"):
+                p_embeddings = p_raw.tolist()
+            else:
+                p_embeddings = [e.tolist() if hasattr(e, "tolist") else list(e) for e in p_raw]
+            for chunk, emb in zip(parent_chunks, p_embeddings):
+                chunk["embedding"] = emb
+            self._store.add_chunks(parent_chunks)
+            logger.debug("Stored {} parent chunks for {}", len(parent_chunks), filename)
+
+        # Embed all child chunks in one batch
         texts = [c["content"] for c in all_chunks]
         raw = self._model.encode(texts, show_progress_bar=False)
         # Support numpy arrays (LocalEmbedder) and plain lists (OpenAICompatibleEmbedder)

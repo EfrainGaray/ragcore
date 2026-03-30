@@ -129,3 +129,86 @@ async def test_search_query_too_long_raises(retriever):
         # so we also test via the SearchRequest model.
         from ragcore.models import SearchRequest
         SearchRequest(query=long_query)
+
+
+# ---------------------------------------------------------------------------
+# HyDE integration — skipped until Architecture agent delivers ragcore.hyde
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_with_hyde_uses_hypothetical_embedding(store):
+    """When hyde_enabled=True, Retriever must embed the HyDE-generated text
+    (not the raw query) when calling the embedding model.
+
+    This test is skipped if ragcore.hyde does not exist yet.
+    """
+    pytest.importorskip(
+        "ragcore.hyde",
+        reason="ragcore.hyde not yet implemented (Architecture agent pending)",
+    )
+
+    from ragcore.config import Settings
+    from ragcore.retrieval import Retriever
+    from tests.conftest import _FakeSentenceTransformer, _FakeCrossEncoder
+
+    HYPOTHETICAL_TEXT = "Hypothetical: transformers use self-attention mechanisms for sequence modelling."
+    ORIGINAL_QUERY = "how do transformers work?"
+
+    cfg = Settings(top_k=5, top_n=3, hyde_enabled=True)
+
+    embed_model = _FakeSentenceTransformer()
+    rerank_model = _FakeCrossEncoder()
+
+    # Patch HyDE.generate so we control what hypothetical text is produced
+    with MagicMock() as _:
+        pass  # just warm up MagicMock import
+
+    from unittest.mock import patch as _patch
+
+    with _patch("ragcore.hyde.HyDE.generate", return_value=HYPOTHETICAL_TEXT) as mock_generate:
+        # Also capture what text the embedding model actually encodes
+        embedded_texts: list[str] = []
+        original_encode = embed_model.encode
+
+        def capturing_encode(texts, **kwargs):
+            embedded_texts.extend(texts if isinstance(texts, list) else [texts])
+            return original_encode(texts, **kwargs)
+
+        embed_model.encode = capturing_encode
+
+        retriever = Retriever(
+            store=store,
+            embedding_model=embed_model,
+            rerank_model=rerank_model,
+            settings=cfg,
+        )
+
+        # Seed store so search actually runs
+        store.add_chunks(
+            [
+                {
+                    "id": str(uuid.uuid4()),
+                    "content": "transformer self-attention",
+                    "filename": "doc.txt",
+                    "page": 0,
+                    "chunk_index": 0,
+                    "embedding": np.random.default_rng(7).standard_normal(8).tolist(),
+                }
+            ]
+        )
+
+        await retriever.search(ORIGINAL_QUERY)
+
+    # HyDE.generate must have been called with the original query
+    mock_generate.assert_called_once_with(ORIGINAL_QUERY)
+
+    # The embedding call must use the hypothetical text, NOT the original query
+    assert HYPOTHETICAL_TEXT in embedded_texts, (
+        f"Embedding model must be called with HyDE text {HYPOTHETICAL_TEXT!r}, "
+        f"but it was called with: {embedded_texts}"
+    )
+    assert ORIGINAL_QUERY not in embedded_texts, (
+        f"Embedding model must NOT be called with raw query when HyDE is enabled, "
+        f"but found {ORIGINAL_QUERY!r} in: {embedded_texts}"
+    )

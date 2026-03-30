@@ -95,8 +95,10 @@ class _FakeCollection:
         distances = [[0.1 * (j + 1) for j in range(len(items))]]
         return {"ids": ids, "documents": docs, "metadatas": metas, "distances": distances}
 
-    def get(self, where=None, include=None):
+    def get(self, where=None, include=None, ids=None):
         items = list(self._data.items())
+        if ids is not None:
+            items = [(id_, d) for id_, d in items if id_ in ids]
         if where:
             items = [
                 (id_, d)
@@ -144,10 +146,38 @@ def _make_chromadb_module():
 sys.modules.setdefault("sentence_transformers", _make_sentence_transformers_module())
 sys.modules.setdefault("chromadb", _make_chromadb_module())
 
+# ---------------------------------------------------------------------------
+# Fake rank_bm25
+# ---------------------------------------------------------------------------
+
+
+class _FakeBM25Okapi:
+    """Minimal BM25Okapi stub — returns zeros for OOV queries, ones otherwise."""
+
+    def __init__(self, tokenized_corpus):
+        self._n = len(tokenized_corpus)
+        self._vocab: set[str] = set()
+        for doc_tokens in tokenized_corpus:
+            self._vocab.update(doc_tokens)
+
+    def get_scores(self, query_tokens):
+        if not any(t in self._vocab for t in query_tokens):
+            return np.zeros(self._n, dtype=np.float32)
+        return np.ones(self._n, dtype=np.float32)
+
+
+def _make_rank_bm25_module():
+    mod = types.ModuleType("rank_bm25")
+    mod.BM25Okapi = _FakeBM25Okapi
+    return mod
+
+
 # Also stub out heavy optional deps that might be missing in the test env
 for _mod in ["pypdf", "docx", "pandas"]:
     if _mod not in sys.modules:
         sys.modules[_mod] = types.ModuleType(_mod)
+
+sys.modules.setdefault("rank_bm25", _make_rank_bm25_module())
 
 
 # ---------------------------------------------------------------------------
