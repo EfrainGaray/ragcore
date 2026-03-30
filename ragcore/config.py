@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     # ChromaDB
     chroma_path: str = "./data/chroma"
     chroma_collection: str = "ragcore"
+    chroma_namespace: str = "default"
 
     # Embedding + rerank models
     embedding_model: str = "all-MiniLM-L6-v2"

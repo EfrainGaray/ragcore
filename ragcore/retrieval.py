@@ -10,6 +10,7 @@ from loguru import logger
 
 from ragcore.config import Settings
 from ragcore.models import SearchResponse, SearchResult
+from ragcore.store.cache import SearchCache
 from ragcore.store.chroma import RagStore
 
 
@@ -22,11 +23,13 @@ class Retriever:
         embedding_model,
         rerank_model,
         settings: Settings,
+        cache: SearchCache | None = None,
     ) -> None:
         self._store = store
         self._embed_model = embedding_model
         self._rerank_model = rerank_model
         self._settings = settings
+        self._cache: SearchCache = cache if cache is not None else SearchCache()
 
     # ------------------------------------------------------------------
     # Internal helpers (CPU-bound — run off the event loop)
@@ -56,6 +59,15 @@ class Retriever:
     ) -> SearchResponse:
         t0 = time.perf_counter()
         effective_top_n = top_n if top_n is not None else self._settings.top_n
+        resolved_filters = filters or {}
+
+        # 0. Cache lookup
+        cache_key = SearchCache.make_key(query, top_n, resolved_filters)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache hit for query={!r}", query)
+            return cached.model_copy(update={"cache_hit": True})
+
         loop = asyncio.get_event_loop()
 
         # 1. Embed query (CPU-bound)
@@ -68,7 +80,7 @@ class Retriever:
                 self._store.search,
                 query_embedding,
                 self._settings.top_k,
-                filters or {},
+                resolved_filters,
             ),
         )
         logger.debug("Vector search returned {} candidates for query={!r}", len(candidates), query)
@@ -103,9 +115,15 @@ class Retriever:
             latency_ms,
         )
 
-        return SearchResponse(
+        response = SearchResponse(
             results=results,
             total=len(results),
             query=query,
             latency_ms=round(latency_ms, 2),
+            cache_hit=False,
         )
+
+        # 5. Store in cache
+        self._cache.set(cache_key, response)
+
+        return response

@@ -56,27 +56,46 @@ def _read_xlsx(data: bytes) -> list[tuple[str, int]]:
     return pages
 
 
-def _read_code(data: bytes) -> list[tuple[str, int]]:
-    """Plain-text read for code / markdown files."""
+def _read_text(data: bytes) -> list[tuple[str, int]]:
+    """Plain-text read for prose / markup / config files."""
     return [(data.decode("utf-8", errors="replace"), 0)]
 
 
+def _read_code(data: bytes) -> list[tuple[str, int]]:
+    """Plain-text read for source-code files."""
+    return [(data.decode("utf-8", errors="replace"), 0)]
+
+
+# Extensions treated as source code (smaller chunks, file_type="code")
+CODE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".ts", ".js", ".go", ".rs", ".java",
+})
+
+# Default chunk size for code files (preserves function/class boundaries better)
+CODE_CHUNK_SIZE = 256
+
 _READERS = {
-    ".txt": _read_txt,
+    ".txt": _read_text,
     ".pdf": _read_pdf,
     ".docx": _read_docx,
     ".xlsx": _read_xlsx,
     ".xls": _read_xlsx,
-    ".md": _read_code,
+    ".md": _read_text,
+    ".json": _read_text,
+    ".yaml": _read_text,
+    ".yml": _read_text,
+    ".toml": _read_text,
+    ".csv": _read_text,
+    # Source-code files
     ".py": _read_code,
     ".ts": _read_code,
     ".js": _read_code,
-    ".json": _read_code,
-    ".yaml": _read_code,
-    ".yml": _read_code,
-    ".toml": _read_code,
-    ".csv": _read_code,
+    ".go": _read_code,
+    ".rs": _read_code,
+    ".java": _read_code,
 }
+
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(_READERS.keys())
 
 
 def extract_text(filename: str, data: bytes) -> list[tuple[str, int]]:
@@ -163,13 +182,18 @@ class Ingestor:
         pages = extract_text(filename, data)
         logger.info("Ingesting {} — {} page(s)", filename, len(pages))
 
+        ext = Path(filename).suffix.lower()
+        is_code = ext in CODE_EXTENSIONS
+        file_type = "code" if is_code else "document"
+        effective_chunk_size = CODE_CHUNK_SIZE if is_code else self._settings.chunk_size
+
         all_chunks: list[dict] = []
         chunk_index = 0
 
         for text, page in pages:
             text_chunks = chunk_text(
                 text,
-                chunk_size=self._settings.chunk_size,
+                chunk_size=effective_chunk_size,
                 chunk_overlap=self._settings.chunk_overlap,
             )
             for chunk in text_chunks:
@@ -180,6 +204,7 @@ class Ingestor:
                         "filename": filename,
                         "page": page,
                         "chunk_index": chunk_index,
+                        "file_type": file_type,
                     }
                 )
                 chunk_index += 1

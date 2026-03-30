@@ -32,6 +32,7 @@ class SearchResponse(BaseModel):
     total: int
     query: str
     latency_ms: float
+    cache_hit: bool = False
 
 
 class DocumentInfo(BaseModel):

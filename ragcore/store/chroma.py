@@ -15,22 +15,28 @@ from ragcore.models import DocumentInfo
 class RagStore:
     """Thin wrapper around a ChromaDB persistent collection."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, namespace: str | None = None) -> None:
         self._settings = settings
+        self._namespace = namespace if namespace is not None else settings.chroma_namespace
         self._client = chromadb.PersistentClient(path=settings.chroma_path)
         self._collection = self._client.get_or_create_collection(
             name=settings.chroma_collection,
             metadata={"hnsw:space": "cosine"},
         )
         logger.info(
-            "RagStore initialised — collection={} path={}",
+            "RagStore initialised — collection={} path={} namespace={}",
             settings.chroma_collection,
             settings.chroma_path,
+            self._namespace,
         )
 
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
+
+    def _ns_id(self, chunk_id: str) -> str:
+        """Prepend namespace to a chunk ID."""
+        return f"{self._namespace}:{chunk_id}"
 
     def add_chunks(self, chunks: list[dict]) -> None:
         """Add pre-embedded chunks to the collection.
@@ -41,7 +47,7 @@ class RagStore:
         if not chunks:
             return
 
-        ids = [c["id"] for c in chunks]
+        ids = [self._ns_id(c["id"]) for c in chunks]
         documents = [c["content"] for c in chunks]
         embeddings = [c["embedding"] for c in chunks]
         metadatas = [
@@ -50,6 +56,8 @@ class RagStore:
                 "page": str(c["page"]),
                 "chunk_index": int(c["chunk_index"]),
                 "added_at": datetime.now(timezone.utc).isoformat(),
+                "namespace": self._namespace,
+                "file_type": c.get("file_type", "document"),
             }
             for c in chunks
         ]
@@ -60,7 +68,7 @@ class RagStore:
             embeddings=embeddings,
             metadatas=metadatas,
         )
-        logger.debug("Added {} chunks to collection", len(chunks))
+        logger.debug("Added {} chunks to collection (namespace={})", len(chunks), self._namespace)
 
     # ------------------------------------------------------------------
     # Read
@@ -73,7 +81,13 @@ class RagStore:
         filters: dict | None = None,
     ) -> list[dict]:
         """Vector search.  Returns up to *top_k* results."""
-        where = filters if filters else None
+        # Merge caller filters with namespace filter
+        ns_filter: dict = {"namespace": self._namespace}
+        if filters:
+            # Combine with $and when both are present
+            where: dict | None = {"$and": [{k: v} for k, v in {**ns_filter, **filters}.items()]}
+        else:
+            where = ns_filter
         result = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=min(top_k, max(self._collection.count(), 1)),
@@ -101,7 +115,7 @@ class RagStore:
                     "metadata": {
                         k: v
                         for k, v in meta.items()
-                        if k not in {"filename", "page", "chunk_index"}
+                        if k not in {"filename", "page", "chunk_index", "namespace"}
                     },
                 }
             )
@@ -113,15 +127,20 @@ class RagStore:
     # ------------------------------------------------------------------
 
     def delete_by_filename(self, filename: str) -> int:
-        """Delete all chunks belonging to *filename*.  Returns count deleted."""
+        """Delete all chunks belonging to *filename* in the current namespace."""
         result = self._collection.get(
-            where={"filename": filename},
+            where={"$and": [{"filename": filename}, {"namespace": self._namespace}]},
             include=["metadatas"],
         )
         ids = result["ids"]
         if ids:
             self._collection.delete(ids=ids)
-            logger.info("Deleted {} chunks for filename={}", len(ids), filename)
+            logger.info(
+                "Deleted {} chunks for filename={} namespace={}",
+                len(ids),
+                filename,
+                self._namespace,
+            )
         return len(ids)
 
     # ------------------------------------------------------------------
@@ -129,8 +148,11 @@ class RagStore:
     # ------------------------------------------------------------------
 
     def list_documents(self) -> list[DocumentInfo]:
-        """Aggregate stored chunks by filename and return DocumentInfo list."""
-        result = self._collection.get(include=["metadatas"])
+        """Aggregate stored chunks by filename within the current namespace."""
+        result = self._collection.get(
+            where={"namespace": self._namespace},
+            include=["metadatas"],
+        )
         counts: dict[str, int] = defaultdict(int)
         added_ats: dict[str, str] = {}
 
@@ -143,6 +165,16 @@ class RagStore:
             DocumentInfo(filename=fname, chunks=counts[fname], added_at=added_ats[fname])
             for fname in sorted(counts)
         ]
+
+    def list_namespaces(self) -> list[str]:
+        """Return all distinct namespace values across the entire collection."""
+        result = self._collection.get(include=["metadatas"])
+        namespaces: set[str] = set()
+        for meta in result["metadatas"]:
+            ns = meta.get("namespace")
+            if ns is not None:
+                namespaces.add(ns)
+        return sorted(namespaces)
 
     def count(self) -> int:
         """Total number of chunks in the collection."""

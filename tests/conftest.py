@@ -68,6 +68,16 @@ class _FakeCollection:
         for id_, doc, emb, meta in zip(ids, documents, embeddings, metadatas):
             self._data[id_] = {"document": doc, "embedding": emb, "metadata": meta}
 
+    @staticmethod
+    def _matches_where(metadata: dict, where: dict) -> bool:
+        """Evaluate a ChromaDB where clause (supports plain dict and $and)."""
+        if "$and" in where:
+            return all(
+                _FakeCollection._matches_where(metadata, clause)
+                for clause in where["$and"]
+            )
+        return all(metadata.get(k) == v for k, v in where.items())
+
     def query(self, query_embeddings, n_results, where=None, include=None):
         items = list(self._data.items())
         # Simple filtering
@@ -75,7 +85,7 @@ class _FakeCollection:
             items = [
                 (id_, d)
                 for id_, d in items
-                if all(d["metadata"].get(k) == v for k, v in where.items())
+                if self._matches_where(d["metadata"], where)
             ]
         # Return top n_results (no actual ANN — just first N)
         items = items[:n_results]
@@ -91,7 +101,7 @@ class _FakeCollection:
             items = [
                 (id_, d)
                 for id_, d in items
-                if all(d["metadata"].get(k) == v for k, v in where.items())
+                if self._matches_where(d["metadata"], where)
             ]
         return {
             "ids": [i for i, _ in items],

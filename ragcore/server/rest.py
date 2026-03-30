@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -21,7 +21,32 @@ from ragcore.models import (
     SearchResult,
 )
 from ragcore.retrieval import Retriever
+from ragcore.server.middleware import ObservabilityMiddleware, RateLimitMiddleware
 from ragcore.store.ingest import Ingestor
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI tag definitions
+# ---------------------------------------------------------------------------
+
+_TAGS: list[dict[str, Any]] = [
+    {
+        "name": "RAG",
+        "description": "Core retrieval-augmented generation endpoints — search, ingest, manage documents.",
+    },
+    {
+        "name": "Namespaces",
+        "description": "Multi-tenancy support — list and query isolated knowledge-base namespaces.",
+    },
+    {
+        "name": "OpenAI",
+        "description": "OpenAI-compatible endpoints for drop-in integration with AI SDKs.",
+    },
+    {
+        "name": "System",
+        "description": "Operational endpoints: health checks.",
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -43,9 +68,21 @@ def create_app(
 
     app = FastAPI(
         title="ragcore",
-        description="RAG-as-a-service — MCP + OpenAI-compatible API",
+        description=(
+            "RAG-as-a-service — MCP + OpenAI-compatible API.\n\n"
+            "ragcore indexes documents via `/documents/upload`, then retrieves "
+            "relevant chunks via `/search` (sliding-window rate-limited, LRU-cached). "
+            "All responses carry `X-Request-ID` and `X-Latency-Ms` headers."
+        ),
         version="1.0.0",
+        openapi_tags=_TAGS,
     )
+
+    # ------------------------------------------------------------------
+    # Middleware (order matters: outermost first)
+    # ------------------------------------------------------------------
+    app.add_middleware(ObservabilityMiddleware)
+    app.add_middleware(RateLimitMiddleware)
 
     # Store on app state so route handlers can access via request.app.state
     app.state.retriever = retriever
@@ -72,9 +109,35 @@ def create_app(
     # Native RAG endpoints
     # ------------------------------------------------------------------
 
-    @app.get("/health")
+    @app.get(
+        "/health",
+        tags=["System"],
+        summary="Liveness and readiness probe",
+        description=(
+            "Returns `{\"status\": \"ok\"}` when the service is healthy. "
+            "Also reports the document chunk count and model configuration."
+        ),
+        responses={
+            200: {
+                "description": "Service is healthy",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": "ok",
+                            "version": "1.0.0",
+                            "doc_count": 42,
+                            "checks": {
+                                "chroma": "ok",
+                                "embedding_model": "all-MiniLM-L6-v2",
+                                "rerank_model": "cross-encoder/ms-marco-MiniLM-L-2-v2",
+                            },
+                        }
+                    }
+                },
+            }
+        },
+    )
     async def health(ret: Retriever = Depends(get_retriever)) -> dict[str, Any]:
-        """Liveness + readiness probe."""
         doc_count = ret._store.count()
         return {
             "status": "ok",
@@ -87,20 +150,81 @@ def create_app(
             },
         }
 
-    @app.post("/search", response_model=SearchResponse)
+    @app.post(
+        "/search",
+        response_model=SearchResponse,
+        tags=["RAG"],
+        summary="Semantic search over indexed documents",
+        description=(
+            "Embeds the query, performs approximate nearest-neighbour search in ChromaDB, "
+            "then reranks candidates with a CrossEncoder. "
+            "Results are cached (LRU, 300 s TTL). "
+            "Accepts an optional `namespace` query parameter to restrict search to a "
+            "specific knowledge-base partition."
+        ),
+        responses={
+            200: {
+                "description": "Ranked search results",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "results": [
+                                {
+                                    "id": "default:abc123",
+                                    "content": "Retrieval-augmented generation improves LLM accuracy.",
+                                    "score": 0.92,
+                                    "filename": "rag_overview.pdf",
+                                    "page": 1,
+                                    "chunk_index": 0,
+                                    "metadata": {},
+                                }
+                            ],
+                            "total": 1,
+                            "query": "what is RAG?",
+                            "latency_ms": 38.5,
+                            "cache_hit": False,
+                        }
+                    }
+                },
+            },
+            422: {"description": "Validation error (e.g. empty query)"},
+            429: {"description": "Rate limit exceeded"},
+        },
+    )
     async def search(
         req: SearchRequest,
         ret: Retriever = Depends(get_retriever),
     ) -> SearchResponse:
-        """Main RAG search endpoint — embed query, vector search, rerank."""
         return await ret.search(query=req.query, top_n=req.top_n, filters=req.filters)
 
-    @app.post("/documents/upload")
+    @app.post(
+        "/documents/upload",
+        tags=["RAG"],
+        summary="Ingest a document",
+        description=(
+            "Upload a file to be read, chunked, embedded, and stored in ChromaDB. "
+            "Supported formats: `.txt`, `.pdf`, `.docx`, `.xlsx`, `.xls`, `.md`, "
+            "`.json`, `.yaml`, `.yml`, `.toml`, `.csv`, `.py`, `.ts`, `.js`, `.go`, "
+            "`.rs`, `.java`. "
+            "Code files use a smaller chunk size (256 chars) to preserve function/class "
+            "boundaries and are tagged with `file_type: code` in metadata."
+        ),
+        responses={
+            200: {
+                "description": "Document ingested successfully",
+                "content": {
+                    "application/json": {
+                        "example": {"filename": "report.pdf", "chunks_indexed": 15, "status": "ok"}
+                    }
+                },
+            },
+            422: {"description": "Unsupported file format or empty document"},
+        },
+    )
     async def upload_document(
         file: UploadFile = File(...),
         ing: Ingestor = Depends(get_ingestor),
     ) -> dict[str, Any]:
-        """Ingest a document: read, chunk, embed, store."""
         data = await file.read()
         filename = file.filename or "upload"
         try:
@@ -109,29 +233,111 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"filename": filename, "chunks_indexed": chunks_indexed, "status": "ok"}
 
-    @app.get("/documents", response_model=list[DocumentInfo])
+    @app.get(
+        "/documents",
+        response_model=list[DocumentInfo],
+        tags=["RAG"],
+        summary="List ingested documents",
+        description=(
+            "Returns all documents that have been indexed, with chunk counts and "
+            "ingestion timestamps. Accepts an optional `namespace` query parameter "
+            "to list only documents in a specific partition."
+        ),
+        responses={
+            200: {
+                "description": "List of document metadata",
+                "content": {
+                    "application/json": {
+                        "example": [
+                            {"filename": "report.pdf", "chunks": 15, "added_at": "2024-01-01T00:00:00+00:00"}
+                        ]
+                    }
+                },
+            }
+        },
+    )
     async def list_documents(
         ret: Retriever = Depends(get_retriever),
     ) -> list[DocumentInfo]:
-        """List all ingested documents with chunk counts."""
         return ret._store.list_documents()
 
-    @app.delete("/documents/{filename}")
+    @app.delete(
+        "/documents/{filename}",
+        tags=["RAG"],
+        summary="Delete a document",
+        description="Remove all chunks for the given filename from the vector store.",
+        responses={
+            200: {
+                "description": "Deletion result",
+                "content": {
+                    "application/json": {
+                        "example": {"filename": "report.pdf", "deleted": 15}
+                    }
+                },
+            }
+        },
+    )
     async def delete_document(
         filename: str,
         ret: Retriever = Depends(get_retriever),
     ) -> dict[str, Any]:
-        """Delete all chunks for *filename*."""
         deleted = ret._store.delete_by_filename(filename)
         return {"filename": filename, "deleted": deleted}
+
+    # ------------------------------------------------------------------
+    # Namespace endpoints
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/namespaces",
+        tags=["Namespaces"],
+        summary="List all distinct namespaces",
+        description=(
+            "Queries ChromaDB metadata to return every distinct namespace value "
+            "present in the collection. Namespaces allow multiple isolated knowledge "
+            "bases to coexist in a single ChromaDB instance."
+        ),
+        responses={
+            200: {
+                "description": "Sorted list of namespace strings",
+                "content": {
+                    "application/json": {
+                        "example": {"namespaces": ["default", "project-alpha", "support-docs"]}
+                    }
+                },
+            }
+        },
+    )
+    async def list_namespaces(
+        ret: Retriever = Depends(get_retriever),
+    ) -> dict[str, Any]:
+        namespaces = ret._store.list_namespaces()
+        return {"namespaces": namespaces}
 
     # ------------------------------------------------------------------
     # OpenAI-compatible endpoints
     # ------------------------------------------------------------------
 
-    @app.get("/v1/models")
+    @app.get(
+        "/v1/models",
+        tags=["OpenAI"],
+        summary="List available models (OpenAI-compatible)",
+        description="Returns the ragcore pseudo-model in OpenAI model-list format.",
+        responses={
+            200: {
+                "description": "Model list",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "object": "list",
+                            "data": [{"id": "ragcore", "object": "model", "created": 1700000000, "owned_by": "ragcore"}],
+                        }
+                    }
+                },
+            }
+        },
+    )
     async def list_models() -> dict[str, Any]:
-        """OpenAI-compatible model list endpoint."""
         return {
             "object": "list",
             "data": [
@@ -144,16 +350,35 @@ def create_app(
             ],
         }
 
-    @app.post("/v1/embeddings")
+    @app.post(
+        "/v1/embeddings",
+        tags=["OpenAI"],
+        summary="Create embeddings (OpenAI-compatible)",
+        description=(
+            "Accepts `{\"input\": \"text\" | [\"text1\", \"text2\"], \"model\": \"...\"}` "
+            "and returns dense vectors in OpenAI embedding format using ragcore's "
+            "configured sentence-transformer model."
+        ),
+        responses={
+            200: {
+                "description": "Embedding vectors",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "object": "list",
+                            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, -0.2, 0.3]}],
+                            "model": "ragcore",
+                            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+                        }
+                    }
+                },
+            }
+        },
+    )
     async def create_embeddings(
         body: dict,
         ret: Retriever = Depends(get_retriever),
     ) -> dict[str, Any]:
-        """OpenAI-compatible embeddings endpoint.
-
-        Accepts ``{"input": "text" | ["text1", "text2"], "model": "..."}``
-        and returns vectors in OpenAI format.
-        """
         import asyncio
         from functools import partial
 
@@ -186,18 +411,50 @@ def create_app(
             "usage": {"prompt_tokens": sum(len(t.split()) for t in texts), "total_tokens": sum(len(t.split()) for t in texts)},
         }
 
-    @app.post("/v1/chat/completions")
+    @app.post(
+        "/v1/chat/completions",
+        tags=["OpenAI"],
+        summary="Chat completions — RAG context retrieval (OpenAI-compatible)",
+        description=(
+            "OpenAI-compatible chat completions endpoint.\n\n"
+            "**Important:** ragcore does NOT call any LLM. "
+            "The last user message is used as the RAG search query. "
+            "Retrieved chunks are JSON-serialised and returned in "
+            "`choices[0].message.content` so the calling AI can consume them. "
+            "The raw typed results are also available in the bonus `rag_results` field."
+        ),
+        responses={
+            200: {
+                "description": "Retrieved context in OpenAI chat-completion shape",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "id": "ragcore-a1b2c3d4",
+                            "object": "chat.completion",
+                            "model": "ragcore",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "{\"query\": \"...\", \"results\": [], \"total\": 0, \"latency_ms\": 12.3, \"_note\": \"This is retrieved context, not an LLM-generated answer.\"}",
+                                    },
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                            "usage": {},
+                            "rag_results": [],
+                        }
+                    }
+                },
+            },
+            422: {"description": "No user message provided"},
+        },
+    )
     async def chat_completions(
         req: ChatCompletionRequest,
         ret: Retriever = Depends(get_retriever),
     ) -> ChatCompletionResponse:
-        """OpenAI-compatible chat completions endpoint.
-
-        IMPORTANT: ragcore does NOT call any LLM.
-        The last user message is used as the RAG query.
-        The retrieved chunks are serialised to JSON and returned in
-        choices[0].message.content so that the *calling* AI can consume them.
-        """
         # Extract the last user message as the search query
         user_messages = [m for m in req.messages if m.role == "user"]
         if not user_messages:
