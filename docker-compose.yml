@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    command: >
+      uvicorn ragcore.server.rest:app
+      --host 0.0.0.0
+      --port 8000
+      --factory
+    environment:
+      - CHROMA_PATH=/data/chroma
+      - CHROMA_COLLECTION=ragcore
+      - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-2-v2
+      - TOP_K=10
+      - TOP_N=5
+      - CHUNK_SIZE=512
+      - CHUNK_OVERLAP=50
+      - HOST=0.0.0.0
+      - PORT=8000
+      - MCP_PORT=8001
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mcp:
+    build: .
+    command: >
+      python -c "
+      from ragcore.store.chroma import RagStore;
+      from ragcore.retrieval import Retriever;
+      from ragcore.server.mcp import mcp, set_retriever;
+      from ragcore.config import settings;
+      from sentence_transformers import SentenceTransformer, CrossEncoder;
+      store = RagStore(settings);
+      em = SentenceTransformer(settings.embedding_model);
+      rm = CrossEncoder(settings.rerank_model);
+      r = Retriever(store=store, embedding_model=em, rerank_model=rm, settings=settings);
+      set_retriever(r);
+      mcp.run(transport='sse', host='0.0.0.0', port=8001)
+      "
+    environment:
+      - CHROMA_PATH=/data/chroma
+      - CHROMA_COLLECTION=ragcore
+      - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-2-v2
+      - TOP_K=10
+      - TOP_N=5
+      - HOST=0.0.0.0
+      - PORT=8000
+      - MCP_PORT=8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
